@@ -1,4 +1,9 @@
 /*
+ * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * contact: julien.lenoir@airbus.com
+ */
+
+ /*
  * This file is part of Gunpack.
  *
  * Gunpack is free software: you can redistribute it and/or modify

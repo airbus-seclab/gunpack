@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -20,39 +20,50 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "win_kernl.h"
-#include "memory_state.h"
+#include "includes.h"
 
-extern unsigned int TargetPid;
 extern proto_NtFreeVirtualMemory NtFreeVirtualMemory;
-extern int do_log;
+extern ConfigStruct GlobalConfigStruct;
 
 NTSTATUS NTAPI NtFreeVirtualMemory_hook(HANDLE ProcessHandle,PVOID *BaseAddress,PSIZE_T RegionSize,ULONG FreeType)
 {
 	NTSTATUS result;
 	DWORD_PTR CurrentAddress;
 	DWORD_PTR StartAddress, EndAddress;
-	
-	if ( PsGetCurrentProcessId() == (HANDLE)TargetPid )
+    virtualfree_event evt = {0};    
+	 
+	if ( IsProcessTracked(PsGetCurrentProcessId()) )
 	{
 		result = NtFreeVirtualMemory(ProcessHandle, BaseAddress, RegionSize, FreeType);
 		if ( (result == STATUS_SUCCESS) && ( FreeType & MEM_RELEASE) )
 		{
-			pdebug(do_log,"[NtFreeVirtualMemory] Freeing 0x%x with size 0x%x, Type : 0x%x !\n",*BaseAddress,*RegionSize,FreeType);
+			pdebug(GlobalConfigStruct.debug_log,"[NtFreeVirtualMemory] Freeing 0x%x with size 0x%x, Type : 0x%x !\n",*BaseAddress,*RegionSize,FreeType);
 			StartAddress = (DWORD_PTR)*BaseAddress;
 			EndAddress = StartAddress + *RegionSize;
 			
-			pdebug(do_log,"[NtFreeVirtualMemory] StartAddress : 0x%x, EndAddress :  0x%x\n",StartAddress,EndAddress); 
+			pdebug(GlobalConfigStruct.debug_log,"[NtFreeVirtualMemory] StartAddress : 0x%x, EndAddress :  0x%x\n",StartAddress,EndAddress); 
 			
 			for ( CurrentAddress = StartAddress; CurrentAddress < EndAddress ; CurrentAddress += PAGE_SIZE )
 			{
-				pdebug(do_log,"[NtFreeVirtualMemory] Untracking page 0x%x\n",CurrentAddress);
+				pdebug(GlobalConfigStruct.debug_log,"[NtFreeVirtualMemory] Untracking page 0x%x\n",CurrentAddress);
 				SetUntrackedPage(CurrentAddress);
 			}
+            
+            if ( ((PKTHREAD)PsGetCurrentThread())->PreviousMode == UserMode )
+            {
+                //Send event to userland
+                evt.ProcessId = PsGetCurrentProcessId();
+                evt.BaseAddress = *BaseAddress;
+                evt.RegionSize = *RegionSize;
+                evt.FreeType = FreeType;
+                evt.result = result;
+
+                AddEventToBuffer( EVENT_VIRTUAL_FREE ,sizeof(evt), (PVOID)&evt);
+            }
 		}
 	
 		return result;
 	}
-	
+    
 	return NtFreeVirtualMemory(ProcessHandle, BaseAddress, RegionSize, FreeType);
 }

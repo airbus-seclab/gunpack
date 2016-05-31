@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -22,21 +22,19 @@
 
 #include "memory_state.h"
 #include "utils.h"
+#include "DriverDefs.h"
 
 #define PAGE_GUARD 0x100
 extern proto_MiQueryAddressState MiQueryAddressState;
-//extern proto_MmGetVirtualForPhysical MmGetVirtualForPhysical;
 extern proto_MiMakePdeExistAndMakeValid MiMakePdeExistAndMakeValid;
 extern proto_NtQueryVirtualMemory NtQueryVirtualMemory;
 extern proto_NtProtectVirtualMemory NtProtectVirtualMemory;
-extern proto_NtProtectVirtualMemory ZwProtectVirtualMemory;
 extern HANDLE TargetProcessHandle;
 unsigned char TrackedPages[0x7FFFF];
 extern proto_MmAccessFault MmAccessFault;
 extern proto_MiCopyOnWrite MiCopyOnWrite;
 extern ULONG_PTR * MmUserProbeAddress;
-//MiProtectVirtualMemory_proto MiProtectVirtualMemory = NULL;
-extern int do_log;
+extern ConfigStruct GlobalConfigStruct;
 
 ULONG MmProtectValues[32] = {
 	PAGE_NOACCESS,
@@ -80,12 +78,12 @@ void ClearTrackedPages()
 
 int IsTrackedPage(ULONG_PTR PageAddress)
 {
-	return TrackedPages[(ULONG_PTR)PageAddress >> 0xC];
+	return ( TrackedPages[(ULONG_PTR)PageAddress >> 0xC] & 1);
 }
 
 void SetTrackedPage(ULONG_PTR PageAddress)
 {
-	TrackedPages[(ULONG_PTR)PageAddress >> 0xC] = 1;
+	TrackedPages[(ULONG_PTR)PageAddress >> 0xC] |= 1;
 }
 
 void SetUntrackedPage(ULONG_PTR PageAddress)
@@ -93,20 +91,31 @@ void SetUntrackedPage(ULONG_PTR PageAddress)
 	TrackedPages[(ULONG_PTR)PageAddress >> 0xC] = 0;
 }
 
-int IsMemoryTracked(ULONG Page)
+void SetTrackedPageInfo(ULONG_PTR PageAddress, int Writable, int Executable)
 {
-	PTE * ppte_virtual = NULL;
-	
-	return 1;
-	
-	ppte_virtual = (PTE *)PTE_VIRTUAL_FROM_ADDRESS(Page);
-
-	if ( ppte_virtual->pte.present == 0 )
-	{
-		//pdebug(do_log,"[IsMemoryTracked] pte for page 0x%x not present\n",Page);
-		return 0;
-	}
+    TrackedPages[(ULONG_PTR)PageAddress >> 0xC] |= 1;
+    
+    if ( Writable )
+        TrackedPages[(ULONG_PTR)PageAddress >> 0xC] |= 2;
+    
+    if ( Executable )
+        TrackedPages[(ULONG_PTR)PageAddress >> 0xC] |= 4;    
 }
+
+void GetTrackedPageInfo(ULONG_PTR PageAddress, unsigned int * pWritable, unsigned int * pExecutable)
+{
+    if ( (TrackedPages[(ULONG_PTR)PageAddress >> 0xC] & 2) != 0 )
+        *pWritable = 1;
+    else
+        *pWritable = 0;
+    
+    if ( (TrackedPages[(ULONG_PTR)PageAddress >> 0xC] & 4) != 0 )
+        *pExecutable = 1;
+    else
+        *pExecutable = 0;
+        
+}
+
 
 //
 // TODO : Handle large pages
@@ -126,7 +135,7 @@ PTE * EnsurePteOK(ULONG_PTR Page)
 
 	if ( ppde_virtual->large_page.ps )
 	{
-		pdebug(do_log,"[EnsurePteOK] LARGE PAGE !!!!!!!!!\n");
+		pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] LARGE PAGE !!!!!!!!!\n");
 		return NULL;
 	}
 
@@ -139,11 +148,11 @@ PTE * EnsurePteOK(ULONG_PTR Page)
 		MmAccessFault(FALSE, (PVOID)Page, UserMode, NULL);	
 	}
 	
-	pdebug(do_log,"[EnsurePteOK] PTE HighPart : 0x%x, LowPart : 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);	
+	pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] PTE HighPart : 0x%x, LowPart : 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);	
 	
 	if ( ppte_virtual->raw.LowPart == 0 )
 	{
-		pdebug(do_log,"[EnsurePteOK] unknown PTE found, exiting !\n");
+		pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] unknown PTE found, exiting !\n");
 		return NULL;
 	}
 	
@@ -153,18 +162,18 @@ PTE * EnsurePteOK(ULONG_PTR Page)
 		
 		if ( (pmme->Prototype) && !(pmme->Transition) )
 		{
-			pdebug(do_log,"[EnsurePteOK] Prototype PTE\n");
+			pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] Prototype PTE\n");
 		}
 		else if ( pmme->Prototype && pmme->Transition )
 		{
-			pdebug(do_log,"[EnsurePteOK] Transition PTE \n");
+			pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] Transition PTE \n");
 		}
 		else if ( (pmme->PageFileLow == 0) && ( pmme->PageFileHigh == 0 ) )
 		{
-			pdebug(do_log,"[EnsurePteOK] Demand zero PTE \n");
+			pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] Demand zero PTE \n");
 		}
 		
-		pdebug(do_log,"[EnsurePteOK] Highpart 0x%x, Lowpart : 0x%x\n", ppte_virtual->raw.HighPart , ppte_virtual->raw.LowPart);
+		pdebug(GlobalConfigStruct.debug_log,"[EnsurePteOK] Highpart 0x%x, Lowpart : 0x%x\n", ppte_virtual->raw.HighPart , ppte_virtual->raw.LowPart);
 		
 		return NULL;
 	}
@@ -176,7 +185,7 @@ int GetMemoryProtectionPae(ULONG Page, unsigned int * pWritable, unsigned int * 
 {
 	PTE * ppte_virtual = NULL;
 	
-	pdebug(do_log,"[GetMemoryProtectionPae] called on virtual address : 0x%x\n",Page);
+	pdebug(GlobalConfigStruct.debug_log,"[GetMemoryProtectionPae] called on virtual address : 0x%x\n",Page);
 	
 	ppte_virtual = EnsurePteOK(Page);
 	if( !ppte_virtual )
@@ -198,18 +207,22 @@ int GetMemoryProtectionPae(ULONG Page, unsigned int * pWritable, unsigned int * 
 
 int SetMemoryProtectionPae2(ULONG Page, unsigned int Writable, unsigned int Executable)
 {
-
 	PTE * ppte_virtual = NULL;
-
-	
+    
 	//This should not happen, but just in case
 	if ( (ULONG_PTR)Page > (ULONG_PTR)*MmUserProbeAddress)
 		return 0;
 	
 	ppte_virtual = (PTE *)PTE_VIRTUAL_FROM_ADDRESS(Page);
+        
+	pdebug(GlobalConfigStruct.debug_log,"[SetMemoryProtectionPae2] called on virtual address : 0x%x\n",Page);
 
-	pdebug(do_log,"[SetMemoryProtectionPae2] called on virtual address : 0x%x\n",Page);
-
+    if( ! ppte_virtual->pte.present )
+    {
+        pdebug(1,"[SetMemoryProtectionPae2] Warning, function called on non present PTE !\n");
+        return 0;
+    }
+    
 	//
 	// Change memory protection bits according to input params
 	//
@@ -225,48 +238,48 @@ int SetMemoryProtectionPae2(ULONG Page, unsigned int Writable, unsigned int Exec
 		ppte_virtual->pte.xd = 0;
 	else
 		ppte_virtual->pte.xd = 1;
-
-	SetTrackedPage(Page);		
-
-	//
-	// Trigger TLB flush
-	// 
-	__asm{
-		mov eax, cr3
-		mov cr3, eax
-		invlpg Page
-	};
-	
-
-	pdebug(do_log,"[SetMemoryProtectionPae2] result : 0x%x 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);
+   
+    SetTrackedPageInfo(Page, Writable, Executable);
+   
+    tlb_flush();
 
 	return 1;
 }
 
 
-int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size)
+int SetInitialPTEStates(ULONG_PTR Base, SIZE_T Size)
 {
 	PMMVAD VadRoot = NULL;
 	PMMVAD CurrentVad = NULL;
-	SIZE_T VadRegionSize;
+	SIZE_T VadRegionSize = 0;
 	ULONG VadPageProtection,Protect,State;
-	PVOID NextVa;
-	SIZE_T i;
-	ULONG_PTR CurrentPage;
-	PTE * ppte_virtual;
+	PVOID NextVa = NULL;
+	SIZE_T i = 0;
+	ULONG_PTR CurrentPage = 0;
+	PTE * ppte_virtual = NULL;
 	NTSTATUS r;
-	
+    int ExecutableFlag;
+    
+    if (GlobalConfigStruct.InitiallyNonExecutable)
+    {
+        ExecutableFlag = 0;
+	}
+    else
+    {
+        ExecutableFlag = 1;
+    }
+    
 	VadRoot = (PMMVAD)GetVadRoot(PsGetCurrentProcess());	
 	if (!VadRoot)
 	{
-		pdebug(do_log,"[ProtectMemoryRange] error : GetVadRoot failed !\n");
+		pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] error : GetVadRoot failed !\n");
 		return 0;
 	}
 	
 	CurrentVad = LocateVadForPage(VadRoot, (ULONG)Base >> 0xC);
 	if(!CurrentVad)
 	{
-		pdebug(do_log,"[ProtectMemoryRange] error : LocateVadForPage failed !\n");
+		pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] error : LocateVadForPage failed !\n");
 		return 0;
 	}
 	
@@ -274,11 +287,11 @@ int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size)
 	VadRegionSize = VadRegionSize * PAGE_SIZE;
 	VadPageProtection = MmProtectValues[CurrentVad->u.Protection];
 	
-	pdebug(do_log,"%x %x\n",(Base + Size),(CurrentVad->EndingVpn + 1)*PAGE_SIZE);
+	pdebug(GlobalConfigStruct.debug_log,"%x %x\n",(Base + Size),(CurrentVad->EndingVpn + 1)*PAGE_SIZE);
 	
 	if ( (Base + Size) > (CurrentVad->EndingVpn + 1)*PAGE_SIZE )
 	{
-		pdebug(do_log,"[ProtectMemoryRange] error : memory region not contained in Vad !\n");
+		pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] error : memory region not contained in Vad !\n");
 		return 0;
 	}
 
@@ -292,7 +305,7 @@ int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size)
 	{
 		Protect = 0;
 		CurrentPage = Base + i;
-		pdebug(do_log,"[ProtectMemoryRange] current page : 0x%x\n",CurrentPage);
+		pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] current page : 0x%x\n",CurrentPage);
 		
 		ppte_virtual = (PTE *)PTE_VIRTUAL_FROM_ADDRESS(CurrentPage);
 	
@@ -302,7 +315,7 @@ int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size)
 		//Do not work on non-present PTE
 		if ( !ppte_virtual->pte.present )
 		{
-			pdebug(do_log,"[ProtectMemoryRange] not present pte : 0x%x 0x%x\n",ppte_virtual->raw.HighPart,ppte_virtual->raw.LowPart);
+			pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] not present pte : 0x%x 0x%x\n",ppte_virtual->raw.HighPart,ppte_virtual->raw.LowPart);
 			
 			if ( ppte_virtual->pte.prototype == 1 )
 			{
@@ -321,41 +334,44 @@ int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size)
 		{
 			if ( (ppte_virtual->pte.present) && (!ppte_virtual->pte.reserved) )
 			{
-				pdebug(do_log,"[ProtectExecutablePTEs] Before MiCopyOnWrite : 0x%x 0x%x!\n",ppte_virtual->raw.HighPart,ppte_virtual->raw.LowPart);
+				pdebug(GlobalConfigStruct.debug_log,"[ProtectExecutablePTEs] Before MiCopyOnWrite : 0x%x 0x%x!\n",ppte_virtual->raw.HighPart,ppte_virtual->raw.LowPart);
 				
 				r = MiCopyOnWrite((PVOID)CurrentPage ,ppte_virtual);
 				if (!r)
 				{
-					pdebug(do_log,"[ProtectExecutablePTEs] MiCopyOnWrite failed !\n",r);
+					pdebug(GlobalConfigStruct.debug_log,"[ProtectExecutablePTEs] MiCopyOnWrite failed !\n",r);
 				}
 				else
 				{
 					ppte_virtual->pte.reserved = 1;
-					pdebug(do_log,"[ProtectExecutablePTEs] After MiCopyOnWrite : 0x%x 0x%x !\n",ppte_virtual->raw.HighPart,ppte_virtual->raw.LowPart);
+					pdebug(GlobalConfigStruct.debug_log,"[ProtectExecutablePTEs] After MiCopyOnWrite : 0x%x 0x%x !\n",ppte_virtual->raw.HighPart,ppte_virtual->raw.LowPart);
 				}
 			}
 		}
 		
 		State = MiQueryAddressState((PVOID)CurrentPage,CurrentVad,PsGetCurrentProcess(),&Protect, &NextVa);
 		
-		pdebug(do_log,"[ProtectMemoryRange] State = 0x%x, VadPageProtection = 0x%x, Protect = 0x%x\n",State, VadPageProtection ,Protect);
+		pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] State = 0x%x, VadPageProtection = 0x%x, Protect = 0x%x\n",State, VadPageProtection ,Protect);
 		
 		//Do no work on un-commited pages
 		if ( !(State & MEM_COMMIT ) )
+        {
+            pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] Page not in commited state !\n");
 			continue;
-		
+		}
+        
 		//If page is 
 		if ( (Protect & PAGE_EXECUTE_READWRITE) || (Protect & PAGE_READWRITE) )
 		{		
-			pdebug(do_log,"[ProtectMemoryRange] Writable page\n");
+			pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] Writable page\n");
 			
-			SetMemoryProtectionPae2(CurrentPage,0,1);
+			SetMemoryProtectionPae2(CurrentPage,0,ExecutableFlag);
 		}
 		else if ( (Protect & PAGE_WRITECOPY) || (Protect & PAGE_EXECUTE_WRITECOPY) )
 		{
-			pdebug(do_log,"[ProtectMemoryRange] Copy writable page\n");
+			pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] Copy writable page\n");
 			
-			pdebug(do_log,"[ProtectMemoryRange] 0x%x 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);
+			pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] 0x%x 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);
 			
 			//Check to see if the page is not yet copy on write. If it is not yet copy on write trigger a fault on write.
 			if ( (ppte_virtual->pte.copyonwrite) && (!ppte_virtual->pte.reserved) )
@@ -363,21 +379,25 @@ int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size)
 				MmAccessFault(WRITE_ACCESS,(PVOID)CurrentPage,UserMode,0);
 			}
 			
-			pdebug(do_log,"[ProtectMemoryRange] 0x%x 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);
+			pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] 0x%x 0x%x\n",ppte_virtual->raw.HighPart, ppte_virtual->raw.LowPart);
 
-			SetMemoryProtectionPae2(CurrentPage,0,1);
+			SetMemoryProtectionPae2(CurrentPage,0,ExecutableFlag);
 		}
 		else if ( (Protect & PAGE_READONLY) || (Protect & PAGE_EXECUTE) || (Protect & PAGE_EXECUTE_READ) )
 		{
-			pdebug(do_log,"[ProtectMemoryRange] READONLY or PAGE_EXECUTE\n");
+			pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] READONLY or PAGE_EXECUTE\n");
 			
 			if ( ppte_virtual->pte.reserved )
 			{
-				pdebug(do_log,"[ProtectMemoryRange] copywrited page\n");
+				pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] copywrited page\n");
 			}
 			
-			SetMemoryProtectionPae2(CurrentPage,0,1);
+			SetMemoryProtectionPae2(CurrentPage,0,ExecutableFlag);
 		}
+        else
+        {
+            pdebug(GlobalConfigStruct.debug_log,"[ProtectMemoryRange] chatte, Protect = 0x%x, VadPageProtection = 0x%x\n",Protect, VadPageProtection);
+        }
 	}
 	
 	return 1;
@@ -396,15 +416,15 @@ void ParseProcessVad(PMMVAD pVad)
 	
 	VadPageProtection = MmProtectValues[pVad->u.Protection];
 
-	pdebug(do_log,"VadRoot->StartingVpn : 0x%x\n", pVad->StartingVpn);
-	pdebug(do_log,"VadRoot->EndingVpn : 0x%x\n", pVad->EndingVpn);
-	pdebug(do_log,"VadPageProtection : 0x%x\n",VadPageProtection);
-	pdebug(do_log,"Commit flag : %d\n",pVad->u.MemCommit);
+	pdebug(GlobalConfigStruct.debug_log,"VadRoot->StartingVpn : 0x%x\n", pVad->StartingVpn);
+	pdebug(GlobalConfigStruct.debug_log,"VadRoot->EndingVpn : 0x%x\n", pVad->EndingVpn);
+	pdebug(GlobalConfigStruct.debug_log,"VadPageProtection : 0x%x\n",VadPageProtection);
+	pdebug(GlobalConfigStruct.debug_log,"Commit flag : %d\n",pVad->u.MemCommit);
 	
 	RegionSize = pVad->EndingVpn - pVad->StartingVpn + 1;
 	RegionSize = RegionSize * PAGE_SIZE;	
 
-	ProtectExecutablePTEs( (ULONG_PTR)(pVad->StartingVpn*PAGE_SIZE), RegionSize);
+	SetInitialPTEStates( (ULONG_PTR)(pVad->StartingVpn*PAGE_SIZE), RegionSize);
 }
 
 /*
@@ -461,7 +481,7 @@ ULONG GetVadMemoryProtect(ULONG_PTR BaseAddress)
 			MiQueryAddressState((PVOID)BaseAddress, CurrentVad, PsGetCurrentProcess(), &Protect, &NextVa );
 		else
 		{
-			pdebug(do_log,"[GetVadMemoryProtect] Pte is invalid !\n");
+			pdebug(GlobalConfigStruct.debug_log,"[GetVadMemoryProtect] Pte is invalid !\n");
 			
 			//Not present PTE so cast it to MMPTE_SOFTWARE
 			pmmte_virtual = (PMMPTE_SOFTWARE)ppte_virtual;
@@ -469,7 +489,7 @@ ULONG GetVadMemoryProtect(ULONG_PTR BaseAddress)
 			//Do no handle Prototype PTEs
 			if (pmmte_virtual->Prototype)
 			{
-				pdebug(do_log,"[GetVadMemoryProtect] Do no handle Prototype PTEs\n");
+				pdebug(GlobalConfigStruct.debug_log,"[GetVadMemoryProtect] Do no handle Prototype PTEs\n");
 				return Protect;
 			}
 			
@@ -477,53 +497,9 @@ ULONG GetVadMemoryProtect(ULONG_PTR BaseAddress)
 		}
 	}
 	else
-		pdebug(do_log,"[GetVadMemoryProtect] LocateVadForPage failed !\n");
+		pdebug(GlobalConfigStruct.debug_log,"[GetVadMemoryProtect] LocateVadForPage failed !\n");
 	
 	return Protect;
-}
-
-int IsProtectCompatible(unsigned int VirtualMemoryProtect, ULONG_PTR AccessViolationType)
-{
-	if ( (AccessViolationType == WRITE_ACCESS) && IsWritable(VirtualMemoryProtect) )
-	{
-		return 1;
-	}
-	
-	if ( (AccessViolationType == EXECUTE_ACCESS) && IsExecutable(VirtualMemoryProtect) )
-	{
-		return 1;
-	}	
-	
-	return 0;
-}
-
-int IsWritable(ULONG Protect)
-{
-	if ( Protect == PAGE_READWRITE )
-		return 1;
-		
-	if ( Protect == PAGE_EXECUTE_READWRITE )
-		return 1;
-
-	return 0;
-}
-
-int IsExecutable(ULONG Protect)
-{
-
-	if ( Protect == PAGE_EXECUTE )
-		return 1;
-
-	if ( Protect == PAGE_EXECUTE_READ )
-		return 1;
-		
-	if ( Protect == PAGE_EXECUTE_READWRITE )
-		return 1;
-
-	if ( Protect == PAGE_EXECUTE_WRITECOPY )
-		return 1;
-		
-	return 0;
 }
 
 /*
@@ -539,15 +515,6 @@ int ShouldItFault(ULONG_PTR FaultStatus,  ULONG PageRights)
 	PMYEPROCESS ProcessObj;
 	
 	ProcessObj = PsGetCurrentProcess();
-
-	/*
-	TODO : there seem to be a problem with the Pcb.Flags field of KPROCESS struct
-	maybe our KPROCESS structure is wrong ?
-	pdebug(do_log,"[ShouldItFault] ExecuteDisable : 0x%d", ProcessObj->Pcb.Flags.ExecuteDisable);
-	pdebug(do_log,"[ShouldItFault] ExecuteEnable : 0x%d", ProcessObj->Pcb.Flags.ExecuteEnable); 
-	pdebug(do_log,"[ShouldItFault] Permanent : 0x%d", ProcessObj->Pcb.Flags.Permanent);
-	pdebug(do_log,"[ShouldItFault] Unused1 : 0x%d", ProcessObj->Pcb.Unused1);
-	*/
 	
 	//Dirty work around to fix the DEP problem
 	//would be better to interpret the flags of the KPROCESS struct
@@ -558,7 +525,7 @@ int ShouldItFault(ULONG_PTR FaultStatus,  ULONG PageRights)
 	
 	if ( ( FaultStatus != WRITE_ACCESS ) && ( FaultStatus != EXECUTE_ACCESS ) )
 	{
-		pdebug(do_log,"[ShouldItFault] ERROR : unexpected fault status : 0x%x\n",FaultStatus);
+		pdebug(GlobalConfigStruct.debug_log,"[ShouldItFault] ERROR : unexpected fault status : 0x%x\n",FaultStatus);
 		return 1;
 	}
 	
@@ -584,7 +551,7 @@ int ShouldItFault(ULONG_PTR FaultStatus,  ULONG PageRights)
 	}
 	
 	//We should never come here...
-	pdebug(do_log,"[ShouldItFault] WTF ???\n"); 
+	pdebug(GlobalConfigStruct.debug_log,"[ShouldItFault] WTF ???\n"); 
 	
 	return 1;
 }

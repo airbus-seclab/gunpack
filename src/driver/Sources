@@ -1,6 +1,7 @@
 TARGETNAME=Driver
 TARGETPATH=obj
 TARGETTYPE=DRIVER
-USER_C_FLAGS=/W2
+USER_C_FLAGS=/W2 /homeparams
 
-SOURCES=Driver.c NtMapViewOfSection.c NtProtectVirtualMemory.c NtAllocateVirtualMemory.c NtFreeVirtualMemory.c NtTerminateProcess.c NtQueryVirtualMemory.c syscall_hook.c exceptions_hook.c exceptions_list.c utils.c memory_state.c
+SOURCES=Driver.c single_step.c NtCreateUserProcess.c NtMapViewOfSection.c NtProtectVirtualMemory.c NtAllocateVirtualMemory.c NtFreeVirtualMemory.c NtTerminateProcess.c NtQueryVirtualMemory.c syscall_hook.c exceptions_hook.c userland_comm.c utils.c memory_state.c notify_routines.c tracked_process.c
+I386_SOURCES=x86_hook.asm x86_utils.asm

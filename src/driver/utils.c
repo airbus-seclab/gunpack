@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -22,42 +22,48 @@
 
 #include "win_kernl.h"
 #include "utils.h"
+#include "memory_state.h"
+#include "tracked_process.h"
+#include "DriverDefs.h"
 
 extern proto_NtQueryVirtualMemory NtQueryVirtualMemory;
-extern int do_log;
+extern ConfigStruct GlobalConfigStruct;
+extern unsigned int TargetPidArray[];
+extern unsigned int TargetPidCount;
+extern proto_PsGetNextProcess PsGetNextProcess;
+extern proto_PsSuspendProcess PsSuspendProcess;
+extern proto_PsTerminateProcess PsTerminateProcess;
+extern proto_PsResumeProcess PsResumeProcess;
 
-PVOID __declspec(naked) GetCurrentKThread()
-{
-	__asm{
-		mov eax, fs:[124h]
-		ret
-	}
-}
 
-HANDLE GetProcessIdByhandle(HANDLE hProcess)
+void DisplayPageFilePTE(LARGE_INTEGER l)
 {
-	int r;
-	PEPROCESS pProcess = NULL;
-	HANDLE Pid = (HANDLE)-1;
-	
-	if ( hProcess == (HANDLE)-1 )
-	{
-		pProcess = PsGetCurrentProcess();
-		Pid = PsGetProcessId(pProcess);
-	}
-	else
-	{
-		r = ObReferenceObjectByHandle(hProcess,PROCESS_QUERY_INFORMATION,*PsProcessType,UserMode,&pProcess,NULL);
-		if (r == STATUS_SUCCESS)
-		{
-			Pid = PsGetProcessId(pProcess);
-			ObDereferenceObject(pProcess);
-		}
-		else
-			Pid = (HANDLE)-1;
-	}
-	
-	return Pid;
+    PTE pte;
+    ULONG PageFileOffset;
+    
+    pte.raw = l;
+    
+    //Not interested in present PTE
+    if ( pte.pte.present )
+    {
+        return;
+    }
+    
+    //Not interested int Unknown PTE
+    if ( pte.raw.LowPart == 0 )
+        return;
+    
+    //Not prototype PTE neither transition PTE
+    //This should be a page file PTE
+    if ( !pte.pte.prototype && !pte.pte.reserved )
+    {
+
+        PageFileOffset = pte.raw.LowPart >> 12;
+        
+        if (PageFileOffset != 0)
+            pdebug(1,"High : 0x%x, Low : 0x%x", pte.raw.HighPart, pte.raw.LowPart);
+                
+    }
 }
 
 void * FindSignatureWithHoles(unsigned char * Start, unsigned int max_size, unsigned char * Signature, unsigned int SignatureSize)
@@ -93,7 +99,6 @@ void * FindSignatureWithHoles(unsigned char * Start, unsigned int max_size, unsi
 	return NULL;
 }
 
-
 void * FindSignature(unsigned char * Start, unsigned int max_size, unsigned char * Signature, unsigned int SignatureSize)
 {
 	unsigned int i;
@@ -115,11 +120,10 @@ void * FindSignature(unsigned char * Start, unsigned int max_size, unsigned char
 	return NULL;
 }
 
-
 void * FindSignatureInProcessModule(PEPROCESS ProcessObj, HANDLE hProcess, unsigned char * StartAddress, ULONG_PTR Size, unsigned char * Signature, ULONG SignatureSize)
 {
 	MEMORY_BASIC_INFORMATION32 MemoryInfo;
-	ULONG retLen = 0;
+	SIZE_T retLen = 0;
 	ULONG_PTR CurrentOffset = 0;
 	NTSTATUS r;
 	int loop = 1;
@@ -142,7 +146,7 @@ void * FindSignatureInProcessModule(PEPROCESS ProcessObj, HANDLE hProcess, unsig
 				//Attach kernel to the target process
 				KeStackAttachProcess(ProcessObj,&ApcState);			
 
-				pdebug(do_log,"[FindSignatureInProcessModule] MemoryInfo.BaseAddress : %p, MemoryInfo.RegionSize = %x\n",MemoryInfo.BaseAddress, MemoryInfo.RegionSize);
+				pdebug(GlobalConfigStruct.debug_log,"[FindSignatureInProcessModule] MemoryInfo.BaseAddress : %p, MemoryInfo.RegionSize = %x\n",MemoryInfo.BaseAddress, MemoryInfo.RegionSize);
 				
 				p = FindSignature((unsigned char *)MemoryInfo.BaseAddress, MemoryInfo.RegionSize, Signature, SignatureSize);
 				if (p)
@@ -158,7 +162,7 @@ void * FindSignatureInProcessModule(PEPROCESS ProcessObj, HANDLE hProcess, unsig
 		}
 		else
 		{
-			pdebug(do_log,"[FindSignatureInProcessModule] NtQueryVirtualMemory failed r = 0x%x\n",r);
+			pdebug(GlobalConfigStruct.debug_log,"[FindSignatureInProcessModule] NtQueryVirtualMemory failed r = 0x%x\n",r);
 			CurrentOffset += PAGE_SIZE;
 		}
 
@@ -167,39 +171,14 @@ void * FindSignatureInProcessModule(PEPROCESS ProcessObj, HANDLE hProcess, unsig
 	return result;
 }
 
-void disable_cr0()
-{
-	__asm
-	{
-		push eax
-		mov eax, CR0
-		and eax, 0FFFEFFFFh
-		mov CR0, eax
-		pop eax
-	}
-
-}
-
-void enable_cr0()
-{
-	__asm
-	{
-		push eax
-		mov eax, CR0
-		or eax, NOT 0FFFEFFFFh
-		mov CR0, eax
-		pop eax
-	}
-}
-
 unsigned char * ComputeBranchAddress(unsigned char * instr_offset)
 {
-	unsigned int delta;
+	int delta;
 	unsigned char * result;
 	
 	if ( (instr_offset[0] == 0xE8) || (instr_offset[0] == 0xE9) )
 	{
-		delta = *(unsigned int *)(instr_offset + 1);
+		delta = *(int *)(instr_offset + 1);
 		result = instr_offset + delta + 5;
 		return result;
 	}
@@ -233,11 +212,129 @@ PVOID GetVadRoot( PEPROCESS process )
 		return pProcess->VadRoot.BalancedRoot.LeftChild;		
 }
 
-
-PVOID __declspec(naked) get_cr3()
+void SuspendTrackedProcesses()
 {
-	__asm{
-		mov eax, cr3
-		ret
-	};
+    PEPROCESS Current = NULL;
+    
+    pdebug(1,"SuspendTrackedProcesses called ");
+    
+    //Iterate over all running processes
+    do 
+    {
+        Current = PsGetNextProcess(Current);
+        if (Current)
+        {
+            //pdebug(1,"pid = %d",Current->UniqueProcessId);
+            //Suspend tracked processes
+            if ( IsProcessTracked(Current->UniqueProcessId) )
+            {
+                SetProcessSuspended(Current->UniqueProcessId);
+                //pdebug(1,"Suspending process pid(%d)",Current->UniqueProcessId);
+                PsSuspendProcess(Current);
+            }
+        }
+    }while(Current);
+}
+
+void ResumeAndUntrackProcesses()
+{
+    PEPROCESS Current = NULL;
+    
+    pdebug(1,"SuspendTrackedProcesses called ");
+    
+    //Iterate over all running processes
+    do 
+    {
+        Current = PsGetNextProcess(Current);
+        if (Current)
+        {
+            pdebug(1,"pid = %d",Current->UniqueProcessId);
+            
+            //Suspend tracked processes
+            if ( IsProcessTracked(Current->UniqueProcessId) )
+            {
+                UnTrackProcess(Current->UniqueProcessId);
+                pdebug(1,"resuming tracked process pid(%d)",Current->UniqueProcessId);
+                PsResumeProcess(Current);
+            }
+        }
+    }while(Current);
+}
+
+
+void SuspendTrackedProcess(HANDLE Pid)
+{
+    NTSTATUS r;
+    HANDLE TargetProcess;
+    CLIENT_ID TargetProcessId;
+    OBJECT_ATTRIBUTES objAttr;
+    PEPROCESS ProcessObj;
+    
+    if (IsProcessTracked(Pid))
+    { 
+
+        memset(&objAttr,0,sizeof(objAttr));
+        objAttr.Length = sizeof(objAttr);
+        
+        TargetProcessId.UniqueThread = NULL;
+        TargetProcessId.UniqueProcess = Pid;
+
+        r = ZwOpenProcess(&TargetProcess, PROCESS_SUSPEND_RESUME, &objAttr, &TargetProcessId);
+        if(r == STATUS_SUCCESS)
+        {
+            r = ObReferenceObjectByHandle(TargetProcess,PROCESS_SUSPEND_RESUME,*PsProcessType,UserMode,&ProcessObj,NULL);
+			if( r == STATUS_SUCCESS )
+			{
+                if ( PsSuspendProcess(ProcessObj) != STATUS_SUCCESS )
+                {
+                    pdebug(1,"PsSuspendProcess failed !\n");
+                }
+                
+                ObDereferenceObject(ProcessObj);
+            }
+            else
+            {
+                pdebug(1,"ObReferenceObjectByHandle failed !\n");
+            }
+
+            ZwClose(TargetProcess);
+            TargetProcess = NULL;
+        }
+        else
+            pdebug(1,"ZwOpenProcess failed !\n");
+    }
+}
+
+
+void TerminateProcesses()
+{
+    HANDLE Pid = NULL;
+    HANDLE TargetProcess;
+    CLIENT_ID TargetProcessId;
+    OBJECT_ATTRIBUTES objAttr;
+    NTSTATUS r;
+               
+    while ( GetNextProcessInArray(&Pid) && (Pid != NULL) )
+    {
+        memset(&objAttr,0,sizeof(objAttr));
+        objAttr.Length = sizeof(objAttr);
+        
+        TargetProcessId.UniqueThread = NULL;
+        TargetProcessId.UniqueProcess = Pid;
+        
+        r = ZwOpenProcess(&TargetProcess, PROCESS_TERMINATE, &objAttr, &TargetProcessId);
+        if(r == STATUS_SUCCESS)
+        {
+            if (RemoveProcessFromArray(Pid) == 0)
+                pdebug(1,"RemoveProcessFromArray failed\n");
+            
+            if (ZwTerminateProcess(TargetProcess,0) != STATUS_SUCCESS)
+                pdebug(1,"ZwTerminateProcess failed\n");
+            else
+                pdebug(1,"ZwTerminateProcess succeeded\n");
+            
+            ZwClose(TargetProcess);
+            TargetProcess = NULL;
+        }   
+    }    
 }

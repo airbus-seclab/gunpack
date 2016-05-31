@@ -20,16 +20,14 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef EXCEPTIONS_HOOK_H
-#define EXCEPTIONS_HOOK_H
+#include "includes.h"
 
-#include "win_kernl.h"
+extern proto_NtCreateUserProcess NtCreateUserProcess;
+extern ConfigStruct GlobalConfigStruct;
 
-int HookExceptionDispatcher(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookExceptionDispatcher();
-int HookKiTrap0E(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookKiTrap0E();
-void HookKiDebugRoutine(PVOID KernelImageBase, ULONG KernelImageSize);
-//void HookInKiDispatchException();
+NTSTATUS NtCreateUserProcess_hook(PHANDLE ProcessHandle, PHANDLE ThreadHandle, ACCESS_MASK ProcessDesiredAccess, ACCESS_MASK ThreadDesiredAccess, POBJECT_ATTRIBUTES ProcessObjectAttributes, POBJECT_ATTRIBUTES ThreadObjectAttributes, ULONG ProcessFlags, ULONG ThreadFlags, PVOID ProcessParameters, PVOID CreateInfo, PVOID AttributeList)
+{
+    pdebug(1,"NtCreateUserProcess_hook called !\n");
 
-#endif
+	return NtCreateUserProcess(ProcessHandle, ThreadHandle, ProcessDesiredAccess, ThreadDesiredAccess, ProcessObjectAttributes, ThreadObjectAttributes, ProcessFlags, ThreadFlags, ProcessParameters, CreateInfo, AttributeList);	
+}

@@ -20,16 +20,19 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef EXCEPTIONS_HOOK_H
-#define EXCEPTIONS_HOOK_H
+#ifndef INCLUDES_H
+#define INCLUDES_H
 
+#include "DriverDefs.h"
 #include "win_kernl.h"
-
-int HookExceptionDispatcher(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookExceptionDispatcher();
-int HookKiTrap0E(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookKiTrap0E();
-void HookKiDebugRoutine(PVOID KernelImageBase, ULONG KernelImageSize);
-//void HookInKiDispatchException();
+#include "syscall_hook.h"
+#include "utils.h"
+#include "exceptions_hook.h"
+#include "memory_state.h"
+#include "userland_comm.h"
+#include "notify_routines.h"
+#include "events.h"
+#include "tracked_process.h"
+#include "single_step.h"
 
 #endif

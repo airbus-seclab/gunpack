@@ -20,16 +20,15 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef EXCEPTIONS_HOOK_H
-#define EXCEPTIONS_HOOK_H
+#ifndef EXCEPTIONS_FILE_H
+#define EXCEPTIONS_FILE_H
 
 #include "win_kernl.h"
+#include "exceptions.h"
+#include "DriverDefs.h"
 
-int HookExceptionDispatcher(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookExceptionDispatcher();
-int HookKiTrap0E(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookKiTrap0E();
-void HookKiDebugRoutine(PVOID KernelImageBase, ULONG KernelImageSize);
-//void HookInKiDispatchException();
+int InitUserlandCommunication();
+VOID CloseUuserlandCommunication();
+VOID AddEventToBuffer(unsigned short EventType, unsigned short EventSize, unsigned char * EventBuffer);
 
 #endif

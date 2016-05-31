@@ -20,16 +20,30 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef EXCEPTIONS_HOOK_H
-#define EXCEPTIONS_HOOK_H
+#ifndef SINGLE_STEP_H
+#define SINGLE_STEP_H
 
 #include "win_kernl.h"
 
-int HookExceptionDispatcher(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookExceptionDispatcher();
-int HookKiTrap0E(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookKiTrap0E();
-void HookKiDebugRoutine(PVOID KernelImageBase, ULONG KernelImageSize);
-//void HookInKiDispatchException();
+#define MAX_ACCESS_ARRAY_SIZE 512
+#define SLOT_USED 1
+#define SLOT_FREE 0 
+
+typedef struct{
+	HANDLE OwningThread;
+	PVOID AccessedAddress;
+	ULONG State;
+} KernelSingleStepAccess;
+
+typedef struct{
+	HANDLE OwningThread;
+	ULONG State;
+} UserSingleStepAccess;
+
+void InitAccessArray();
+int IsThreadSingleStepped(HANDLE OwningThread);
+int AddSingleStepThread(HANDLE OwningThread);
+PVOID GetAccessAddressOfThread(HANDLE OwningThread);
+int AddAccessAddress(HANDLE OwningThread, PVOID AccessedAddress);
 
 #endif

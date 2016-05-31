@@ -20,16 +20,14 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef EXCEPTIONS_HOOK_H
-#define EXCEPTIONS_HOOK_H
+#ifndef NOTIFY_ROUTINES_H
+#define NOTIFY_ROUTINES_H
 
-#include "win_kernl.h"
+#include <win_kernl.h>
 
-int HookExceptionDispatcher(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookExceptionDispatcher();
-int HookKiTrap0E(PVOID KernelImageBase, ULONG KernelImageSize);
-int UnHookKiTrap0E();
-void HookKiDebugRoutine(PVOID KernelImageBase, ULONG KernelImageSize);
-//void HookInKiDispatchException();
+
+void ThreadNotifyRoutine(HANDLE  ProcessId, HANDLE  ThreadId, BOOLEAN  Create);
+void ProcessNotifyRoutine(PEPROCESS Process, HANDLE ProcessId, PS_CREATE_NOTIFY_INFO * pCreateInfo);
+void LoadImageNotifyRoutine(PUNICODE_STRING FullImageName, HANDLE ProcessId, PIMAGE_INFO pImageInfo);
 
 #endif

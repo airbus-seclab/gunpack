@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -20,42 +20,57 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "win_kernl.h"
-#include "memory_state.h"
-#include "utils.h"
+#include "includes.h"
 
-extern unsigned int TargetPid;
 extern proto_NtMapViewOfSection NtMapViewOfSection;
-extern int do_log;
+extern ConfigStruct GlobalConfigStruct;
 
-NTSTATUS NTAPI NtMapViewOfSection_hook(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID *BaseAddress, ULONG ZeroBits, ULONG CommitSize, PLARGE_INTEGER SectionOffset, PULONG ViewSize,SECTION_INHERIT InheritDisposition, ULONG AllocationType, ULONG Protect)
+NTSTATUS NtMapViewOfSection_hook(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID *BaseAddress, ULONG ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize,SECTION_INHERIT InheritDisposition, ULONG AllocationType, ULONG Protect)
 {
 	NTSTATUS result,r;
 	ULONG OldProtect;
-	HANDLE Pid;
+	HANDLE TargetPid;
 	PMYEPROCESS pProc = NULL;
 	int take_hook = 0;
-	
+    mapviewofsection_event evt = {0};
+    
 	//Performe the genuine syscall
-	result = NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize , InheritDisposition, AllocationType, Protect);
+	result = NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize , InheritDisposition, AllocationType, Protect);   
 	if (result != STATUS_SUCCESS)
-		return result;	
-	
+		return result;
+
 	//Reference target process kernel object
 	r = ObReferenceObjectByHandle(ProcessHandle,PROCESS_ALL_ACCESS,*PsProcessType,UserMode,(PVOID)&pProc,NULL);
 	if( r == STATUS_SUCCESS )
 	{
-		if (  ((HANDLE)pProc->UniqueProcessId == (HANDLE)TargetPid) && ( PsGetCurrentProcessId() == (HANDLE)TargetPid) )
+		if ( ( IsProcessTracked( pProc->UniqueProcessId ) ) && ( IsProcessTracked(PsGetCurrentProcessId()) ) ) 
 			take_hook = 1;
 		
+        TargetPid = pProc->UniqueProcessId;
+        
 		ObDereferenceObject(pProc);
 		pProc = NULL;
-	}		
+	}	
 	
 	if (take_hook)
 	{
-		pdebug(do_log,"[NtMapViewOfSection_hook] called : 0x%x, 0x%x",*BaseAddress,*ViewSize);
-		ProtectExecutablePTEs((ULONG_PTR)*BaseAddress,*ViewSize);	
+		pdebug(GlobalConfigStruct.debug_log,"[NtMapViewOfSection_hook] called : 0x%x, 0x%x",*BaseAddress,*ViewSize);
+		SetInitialPTEStates((ULONG_PTR)*BaseAddress,*ViewSize);
+        
+        if ( ((PKTHREAD)PsGetCurrentThread())->PreviousMode == UserMode )
+        {
+            //Send event to userland
+            evt.ProcessId = PsGetCurrentProcessId();
+            evt.TargetPid = TargetPid;
+            evt.BaseAddress = *BaseAddress;
+            evt.ZeroBits = ZeroBits;
+            evt.ViewSize = *ViewSize;
+            evt.AllocationType = AllocationType;
+            evt.Protect = Protect;
+            evt.result = result;
+
+            AddEventToBuffer( EVENT_MAP_VIEW_OF_SECTION ,sizeof(evt), (PVOID)&evt);
+        }
 	}
 	
 	return result;

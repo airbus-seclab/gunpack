@@ -1,7 +1,8 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
+
 /*
  * This file is part of Gunpack.
  *
@@ -110,6 +111,7 @@ typedef union _PDE
 	LARGE_INTEGER raw;
 } PDE;
 
+/*
 typedef struct _MMPTE_SOFTWARE {
     ULONG Valid : 1;
     ULONG PageFileLow : 4;
@@ -118,6 +120,7 @@ typedef struct _MMPTE_SOFTWARE {
     ULONG Transition : 1;
     ULONG PageFileHigh : 20;
 } MMPTE_SOFTWARE, *PMMPTE_SOFTWARE;
+*/
 
 typedef struct
 {
@@ -150,9 +153,11 @@ void ZeroPtes();
 ULONG GetVadMemoryProtect(ULONG_PTR BaseAddress);
 int GetMemoryProtectionPae(ULONG Page, unsigned int * pWritable, unsigned int * pExecutable);
 int SetMemoryProtectionPae2(ULONG Page, unsigned int Writable, unsigned int Executable);
-int ProtectExecutablePTEs(ULONG_PTR Base, SIZE_T Size);
+int SetInitialPTEStates(ULONG_PTR Base, SIZE_T Size);
 int IsTrackedPage(ULONG_PTR PageAddress);
 void SetTrackedPage(ULONG_PTR PageAddress);
 void SetUntrackedPage(ULONG_PTR PageAddress);
 void ClearTrackedPages();
+void SetTrackedPageInfo(ULONG_PTR , int , int );
+void GetTrackedPageInfo(ULONG_PTR , unsigned int * , unsigned int * );
 #endif

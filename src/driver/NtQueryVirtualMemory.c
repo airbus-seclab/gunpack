@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -20,18 +20,14 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "win_kernl.h"
-#include "memory_state.h"
-#include "utils.h"
+#include "includes.h"
 
-extern unsigned int TargetPid;
 extern proto_NtQueryVirtualMemory NtQueryVirtualMemory;
 extern proto_MiCopyOnWrite MiCopyOnWrite;
 extern proto_MiQueryAddressState MiQueryAddressState;
-extern int do_log;
+extern ConfigStruct GlobalConfigStruct;
 
 NTSTATUS NTAPI NtQueryVirtualMemory_hook(HANDLE ProcessHandle, PVOID BaseAddress, __int32 MemoryInformationClass,PVOID MemoryInformation, ULONG MemoryInformationLength, PULONG ReturnLength)
 {
-	//hook disabled
 	return NtQueryVirtualMemory(ProcessHandle,BaseAddress,MemoryInformationClass,MemoryInformation,MemoryInformationLength,ReturnLength);
 }

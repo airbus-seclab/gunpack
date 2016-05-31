@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -20,70 +20,53 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "win_kernl.h"
-#include "memory_state.h"
-#include "utils.h"
+#include "includes.h"
 
-extern unsigned int TargetPid;
 extern proto_NtTerminateProcess NtTerminateProcess;
-extern proto_NtSuspendThread ZwSuspendThread;
-//extern proto_NtTerminateThread ZwTerminateThread;
-extern PKEVENT EventObj;
-extern int do_log;
-int EventSignaled = 0;
+extern proto_NtSuspendProcess ZwSuspendProcess;
 
 NTSTATUS NTAPI NtTerminateProcess_hook(HANDLE ProcessHandle, ULONG ExitCode)
 {
-	NTSTATUS r;
-	PEPROCESS pEproc;
-	NTSTATUS result;
-	HANDLE CurrentThreadId;
-	CLIENT_ID cid;
-	HANDLE CurrentThreadHandle;
-	OBJECT_ATTRIBUTES obj_attr;
-	LARGE_INTEGER Large;
-	
-	if ( PsGetCurrentProcessId() != (HANDLE)TargetPid )
+	NTSTATUS r = STATUS_UNSUCCESSFUL;
+	NTSTATUS result = STATUS_UNSUCCESSFUL;
+    PEPROCESS pProc = NULL;
+    HANDLE TargetPid = NULL;
+    HANDLE CurrentPid = PsGetCurrentProcessId();
+    int take_hook = 0;
+    terminateprocess_event evt = {0};
+
+	//Reference target process kernel object
+	r = ObReferenceObjectByHandle(ProcessHandle,PROCESS_ALL_ACCESS,*PsProcessType,UserMode,(PVOID)&pProc,NULL);
+	if( r == STATUS_SUCCESS )
 	{
-		return NtTerminateProcess(ProcessHandle,ExitCode);
-	}
-	
-	if ( ProcessHandle != (HANDLE)-1 )
-	{
-		return NtTerminateProcess(ProcessHandle,ExitCode);		
-	}
-	
-	pdebug(do_log,"[NtTerminateProcess] Target process trying to kill himself\n");
-	
-	//Signal unpack event for the userland process
-	if( EventSignaled == 0)
-	{
-		KeSetEvent(EventObj,0,0);
-		EventSignaled = 1;
-	}
-	
-	CurrentThreadId = PsGetCurrentThreadId();
-	
-	pdebug(do_log,"[NtTerminateProcess] Current thread id : %d\n",CurrentThreadId);
-	
-	cid.UniqueProcess = NULL;
-	cid.UniqueThread = CurrentThreadId;
-	
-	memset(&obj_attr,0,sizeof(obj_attr));
-	obj_attr.Length = sizeof(obj_attr);
-	
-	r = ZwOpenThread(&CurrentThreadHandle,THREAD_ALL_ACCESS,&obj_attr,&cid);
-	if (r == STATUS_SUCCESS)
-	{
-		pdebug(do_log,"[NtTerminateProcess] suspending current thread...\n");
+        TargetPid = pProc->UniqueProcessId;
+        
+        //If the target process is one of the process we monitor, we'll take the hook
+		if ( IsProcessTracked( TargetPid ) ) 
+			take_hook = 1;
 		
-		ZwSuspendThread(CurrentThreadHandle,NULL);
+		ObDereferenceObject(pProc);
+		pProc = NULL;
 	}
-	else
+    
+
+    if ( take_hook )
 	{
-		pdebug(do_log,"[NtTerminateProcess] ZwOpenThread failed : 0x%x\n",r);
-	}
-	
-	
-	return STATUS_ACCESS_DENIED;
+        evt.ProcessId = CurrentPid;
+        evt.TargetProcessId = TargetPid;
+
+        AddEventToBuffer(EVENT_TERMINATE_PROCESS , sizeof(evt), (PVOID)&evt);  
+
+        //Suspend the monitored process
+        ZwSuspendProcess(ProcessHandle);
+        
+        result = STATUS_ACCESS_DENIED;
+    }
+    else
+    {
+        //Another process is being terminated
+        result = NtTerminateProcess(ProcessHandle, ExitCode);
+    }
+ 
+    return result;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -20,12 +20,18 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "includes.h"
 #include "syscall_hook.h"
 #include "utils.h"
 
 extern void ** ServiceTable;
-
+extern ConfigStruct GlobalConfigStruct;
 SyscallNumbers SysN;
+
+extern unsigned int number_of_hooked_syscalls;
+extern HookSyscall HookedSyscallArray[];
+
+int GetKernelBaseAndSize(PVOID *pImageBaseAddress, ULONG * pImageSize);
 
 proto_NtProtectVirtualMemory NtProtectVirtualMemory = NULL;
 proto_NtAllocateVirtualMemory NtAllocateVirtualMemory = NULL;
@@ -41,70 +47,103 @@ proto_NtCreateSection NtCreateSection = NULL;
 proto_NtCreateThreadEx NtCreateThreadEx = NULL;
 proto_NtSuspendThread NtSuspendThread = NULL;
 proto_NtSetInformationThread NtSetInformationThread = NULL;
+proto_NtCreateUserProcess NtCreateUserProcess = NULL;
 
-void SetSyscallNumbersSeven()
+ULONG_PTR SyscallHookResume = 0;
+ULONG_PTR psyscall_path = 0;
+ULONG KiServiceLimit = KI_SERVICE_LIMIT;
+
+void InitHookedArray()
 {
-	SyscallNumbers * pNSyscalls = &SysN;
-	
-	pNSyscalls->NT_ALLOCATE_VIRTUAL_MEMORY = WIN7_NT_ALLOCATE_VIRTUAL_MEMORY;
-	pNSyscalls->NT_CREATE_PROCESS_EX = WIN7_NT_CREATE_PROCESS_EX;
-	pNSyscalls->NT_CREATE_SECTION = WIN7_NT_CREATE_SECTION;
-	pNSyscalls->NT_CREATE_THREAD = WIN7_NT_CREATE_THREAD;
-	pNSyscalls->NT_CREATE_THREAD_EX = WIN7_NT_CREATE_THREAD_EX;	
-	pNSyscalls->NT_DELETE_FILE = WIN7_NT_DELETE_FILE;
-	pNSyscalls->NT_FREE_VIRTUAL_MEMORY = WIN7_NT_FREE_VIRTUAL_MEMORY;
-	pNSyscalls->NT_MAP_VIEW_OF_SECTION = WIN7_NT_MAP_VIEW_OF_SECTION;
-	pNSyscalls->NT_PROTECT_VIRTUAL_MEMORY = WIN7_NT_PROTECT_VIRTUAL_MEMORY;
-	pNSyscalls->NT_QUERY_VIRTUAL_MEMORY = WIN7_NT_QUERY_VIRTUAL_MEMORY;
-	pNSyscalls->NT_TERMINATE_PROCESS = WIN7_NT_TERMINATE_PROCESS;
-	pNSyscalls->NT_TERMINATE_THREAD = WIN7_NT_TERMINATE_THREAD;
-	pNSyscalls->NT_WRITE_VIRTUAL_MEMORY = WIN7_NT_WRITE_VIRTUAL_MEMORY;
-	pNSyscalls->NT_SUSPEND_THREAD = WIN7_NT_SUSPEND_THREAD;
-	pNSyscalls->NT_SET_INFORMATION_THREAD = WIN7_NT_SET_INFORMATION_THREAD;
+    LONG i;
+    
+    for (i=0 ; i < KI_SERVICE_LIMIT; i++)
+    {
+        HookedSyscallArray[i].Kernfunc = NULL;
+        HookedSyscallArray[i].HookFunc = NULL;
+        HookedSyscallArray[i].SyscallNumber = INVALID_SYSCALL_NUMBER;
+    }
 }
 
-
-void HookSyscalls()
+void AddHookedSyscall(USHORT SyscallNumber, PVOID HookFunc, PVOID * pToOriginal)
 {
-	//Keep the syscall addresses in global variables
-	NtProtectVirtualMemory = (proto_NtProtectVirtualMemory)ServiceTable[SysN.NT_PROTECT_VIRTUAL_MEMORY];
-	NtAllocateVirtualMemory = (proto_NtAllocateVirtualMemory)ServiceTable[SysN.NT_ALLOCATE_VIRTUAL_MEMORY];
-	NtFreeVirtualMemory = (proto_NtFreeVirtualMemory)ServiceTable[SysN.NT_FREE_VIRTUAL_MEMORY];
-	NtCreateThread = (proto_NtCreateThread)ServiceTable[SysN.NT_CREATE_THREAD];
-	NtQueryVirtualMemory = (proto_NtQueryVirtualMemory)ServiceTable[SysN.NT_QUERY_VIRTUAL_MEMORY];
-	NtTerminateProcess = (proto_NtTerminateProcess)ServiceTable[SysN.NT_TERMINATE_PROCESS];
-	NtTerminateThread = (proto_NtTerminateProcess)ServiceTable[SysN.NT_TERMINATE_THREAD];
-	NtCreateProcessEx = (proto_NtCreateProcessEx)ServiceTable[SysN.NT_CREATE_PROCESS_EX];
-	NtDeleteFile =	(proto_NtDeleteFile)ServiceTable[SysN.NT_DELETE_FILE];
-	NtMapViewOfSection =	(proto_NtMapViewOfSection)ServiceTable[SysN.NT_MAP_VIEW_OF_SECTION];
-	NtCreateSection = (proto_NtCreateSection)ServiceTable[SysN.NT_CREATE_SECTION];
-	NtCreateThreadEx = (proto_NtCreateThreadEx)ServiceTable[SysN.NT_CREATE_THREAD_EX];
-	NtSuspendThread = (proto_NtSuspendThread)ServiceTable[SysN.NT_SUSPEND_THREAD];
-	NtSetInformationThread = (proto_NtSetInformationThread)ServiceTable[SysN.NT_SET_INFORMATION_THREAD]; 
+    if (SyscallNumber < KI_SERVICE_LIMIT)
+    {
+        HookedSyscallArray[SyscallNumber].HookFunc = HookFunc;
+        HookedSyscallArray[SyscallNumber].SyscallNumber = SyscallNumber;
+        HookedSyscallArray[SyscallNumber].PointerToOriginalFunc = pToOriginal;
+    }
+}
 
-	disable_cr0();
-		
-	ServiceTable[SysN.NT_PROTECT_VIRTUAL_MEMORY] = NtProtectVirtualMemory_hook;
-	ServiceTable[SysN.NT_ALLOCATE_VIRTUAL_MEMORY]  = NtAllocateVirtualMemory_hook;
-	ServiceTable[SysN.NT_FREE_VIRTUAL_MEMORY]  = NtFreeVirtualMemory_hook;
-	ServiceTable[SysN.NT_TERMINATE_PROCESS]  = NtTerminateProcess_hook;
-	ServiceTable[SysN.NT_QUERY_VIRTUAL_MEMORY]  = NtQueryVirtualMemory_hook;
-	ServiceTable[SysN.NT_MAP_VIEW_OF_SECTION] = NtMapViewOfSection_hook;
+PVOID GetSyscallHookFunc(PVOID KernFunc)
+{
+    LONG i;
+    
+    for (i=0 ; i < KI_SERVICE_LIMIT; i++)
+    {
+        if ( KernFunc == HookedSyscallArray[i].Kernfunc)
+            return HookedSyscallArray[i].HookFunc;
+    }
+    
+    return NULL;
+}
 
-	enable_cr0();	
+int HookSyscalls(PVOID KernelImageBase, ULONG KernelImageSize)
+{
+    LONG i;
+
+    if (!ServiceTable)
+    {
+        pdebug(GlobalConfigStruct.debug_log,"[HookSyscalls] ServiceTable has not been resolved !\n");
+        return 0;
+    }
+    
+    InitHookedArray();
+
+    //Here we can add all the system calls we want to hook
+    AddHookedSyscall(WIN_NT_ALLOCATE_VIRTUAL_MEMORY,NtAllocateVirtualMemory_hook, (PVOID *)&NtAllocateVirtualMemory);    
+    AddHookedSyscall(WIN_NT_PROTECT_VIRTUAL_MEMORY,NtProtectVirtualMemory_hook, (PVOID *)&NtProtectVirtualMemory);
+    AddHookedSyscall(WIN_NT_QUERY_VIRTUAL_MEMORY,NtQueryVirtualMemory_hook, (PVOID *)&NtQueryVirtualMemory);
+    AddHookedSyscall(WIN_NT_MAP_VIEW_OF_SECTION,NtMapViewOfSection_hook, (PVOID *)&NtMapViewOfSection);
+    AddHookedSyscall(WIN_NT_FREE_VIRTUAL_MEMORY,NtFreeVirtualMemory_hook, (PVOID *)&NtFreeVirtualMemory);    
+    AddHookedSyscall(WIN_NT_CREATE_USER_PROCESS,NtCreateUserProcess_hook, (PVOID *)&NtCreateUserProcess);
+    AddHookedSyscall(WIN_NT_TERMINATE_PROCESS,NtTerminateProcess_hook, (PVOID *)&NtTerminateProcess);
+    
+    cr0_disable_write_protect();
+    
+    for (i = 0; i < KI_SERVICE_LIMIT; i++)
+    {
+        LONG SysN = HookedSyscallArray[i].SyscallNumber;
+
+        if ( SysN != INVALID_SYSCALL_NUMBER  )
+        {
+            //On 32 bits systems we use regular pointers, it is easier
+            HookedSyscallArray[i].Kernfunc = ServiceTable[SysN];
+            *HookedSyscallArray[i].PointerToOriginalFunc = ServiceTable[SysN];
+            ServiceTable[SysN] = HookedSyscallArray[i].HookFunc;
+        }
+    }
+    
+    cr0_enable_write_protect();
+    
+    return 1;
 }
 
 void UnhookSyscalls()
 {
-	disable_cr0();	
-
-	ServiceTable[SysN.NT_PROTECT_VIRTUAL_MEMORY] = NtProtectVirtualMemory;
-	ServiceTable[SysN.NT_ALLOCATE_VIRTUAL_MEMORY]  = NtAllocateVirtualMemory;
-	ServiceTable[SysN.NT_FREE_VIRTUAL_MEMORY]  = NtFreeVirtualMemory;
-	ServiceTable[SysN.NT_TERMINATE_PROCESS]  = NtTerminateProcess;
-	ServiceTable[SysN.NT_QUERY_VIRTUAL_MEMORY]  = NtQueryVirtualMemory;
-	ServiceTable[SysN.NT_MAP_VIEW_OF_SECTION] = NtMapViewOfSection;
-
-	enable_cr0();
+    LONG i;    
+        
+	cr0_disable_write_protect();
+    
+    for (i = 0; i < KI_SERVICE_LIMIT; i++)
+    {
+        if ( HookedSyscallArray[i].SyscallNumber != INVALID_SYSCALL_NUMBER  )
+        { 
+            //On 32 bits systems we use regular pointers, it is easier
+            ServiceTable[i] = HookedSyscallArray[i].Kernfunc;
+        }
+    }
+    
+	cr0_enable_write_protect();
 }
 

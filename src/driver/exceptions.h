@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Julien Lenoir / Airbus Group Innovations
+ * Copyright 2016 Julien Lenoir / Airbus Group Innovations
  * contact: julien.lenoir@airbus.com
  */
 
@@ -20,13 +20,28 @@
  * along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef EXCEPTIONS_LIST_H
-#define EXCEPTIONS_LIST_H
+#ifndef EXCEPTIONS_H
+#define EXCEPTIONS_H
 
 #include "win_kernl.h"
 
 #pragma pack(push,1)
+
 typedef struct{
+    ULONG_PTR Eax;
+    ULONG_PTR Ecx;
+    ULONG_PTR Edx;    
+    ULONG_PTR Ebx;
+    ULONG_PTR Esp;
+    ULONG_PTR Esi;
+    ULONG_PTR Edi;
+    ULONG_PTR Eip;
+} THE_CONTEXT;
+
+typedef struct{
+    THE_CONTEXT Ctx;
+    HANDLE Pid;
+    HANDLE Tid;
 	PVOID AccessedAddress;
 	ULONG AccessType;
 	ULONG InDllLoad;
@@ -35,28 +50,9 @@ typedef struct{
 	HANDLE OwningThread;
 	HANDLE CurrentThread;
 	LONGLONG PhysicalAddress;
-	ULONG_PTR Esp;
-	ULONG_PTR Esp_top_value;
-	USHORT DllName[MAX_PATH];
+	ULONG_PTR DllBaseAddress;
 } EXCEPTION_INFO, *PEXCEPTION_INFO;
 
-typedef struct{
-	PVOID NextElement;
-	EXCEPTION_INFO ExceptionInfo;
-} EXCEPTION_ELEMENT, *PEXCEPTION_ELEMENT;
-
-typedef struct{
-	PEXCEPTION_ELEMENT FirstElement;
-	PEXCEPTION_ELEMENT LastElement;
-	ULONG Count;
-} EXCEPTION_LIST, * PEXCEPTION_LIST;
 #pragma pack(pop)
-
-void InitExceptionList();
-ULONG GetExceptionCount();
-void AddExceptionToList(PEXCEPTION_INFO pExp);
-void GetFirstException(PEXCEPTION_INFO pOutExp);
-void CleanupExceptionsList();
-void InitAccessArray();
 
 #endif

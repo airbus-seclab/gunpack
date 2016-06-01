@@ -1,5 +1,5 @@
 """
-   Copyright 2015 Julien Lenoir / Airbus Group Innovations
+   Copyright 2016 Julien Lenoir / Airbus Group Innovations
    contact: julien.lenoir@airbus.com
 """
 """
@@ -23,7 +23,15 @@ import ctypes
 import os
 import time
 import pefile
-try :
+from scylla import Scylla
+from process import Process
+from threading import Thread
+from defines import *
+from events import *
+from process import *
+import sys
+
+try:
     from lib.common.defines import KERNEL32, DWORD, LPVOID, PROCESS_INFORMATION, STARTUPINFO, MEMORY_BASIC_INFORMATION, LONG, BYTE, CREATE_SUSPENDED, MEM_IMAGE, MEM_PRIVATE, MEM_COMMIT, HANDLE, LPTSTR, MODULEENTRY32
 except ImportError:
     from defines import KERNEL32, DWORD, LPVOID, PROCESS_INFORMATION, STARTUPINFO, MEMORY_BASIC_INFORMATION, LONG, BYTE, CREATE_SUSPENDED, MEM_IMAGE, MEM_PRIVATE, MEM_COMMIT, HANDLE, LPTSTR, MODULEENTRY32
@@ -34,520 +42,261 @@ ONE_SEC = 1000
 #### Windows internal stuff
 #############################
 
-LPDWORD = ctypes.POINTER(DWORD)
-CHAR = ctypes.c_char
-LPSTR = ctypes.POINTER(CHAR)
-
-
-TH32CS_SNAPMODULE = 0x00000008
 
 PAGE_SIZE = 0x1000
 NULL = 0
-MEM_FREE = 0x10000
 
-GENERIC_READ  = 	0x80000000
-GENERIC_WRITE = 	0x40000000
+GENERIC_READ              = 0x80000000
+GENERIC_WRITE             = 0x40000000
 
-OPEN_EXISTING = 	3
+OPEN_EXISTING             = 3
 
-WAIT_TIMEOUT = 		0x102
-WAIT_ABANDONED = 	0x80
-WAIT_OBJECT_0 = 	0
+WAIT_TIMEOUT              = 0x102
+WAIT_ABANDONED            = 0x80
+WAIT_OBJECT_0             = 0
 
-PROCESS_ALL_ACCESS = 0x001FFFFF
+PROCESS_ALL_ACCESS        = 0x001FFFFF
+
+PIPE_ACCESS_INBOUND       = 0x00000001
+PIPE_ACCESS_DUPLEX        = 0x00000003
+PIPE_TYPE_MESSAGE         = 0x00000004
+PIPE_READMODE_MESSAGE     = 0x00000002
+PIPE_WAIT                 = 0x00000000
+PIPE_UNLIMITED_INSTANCES  = 0x000000ff
+PIPE_TYPE_BYTE            = 0x00000000
+PIPE_READMODE_BYTE        = 0x00000000
+
 
 MAX_PATH = 260
-INVALID_HANDLE_VALUE = LPVOID(-1)
+INVALID_HANDLE_VALUE = HANDLE(-1)
 
 #############################
 #### Driver communication
 #############################
 
-
-IOCTL_SETUP_STUFF = 		0x9C40E000
-IOCTL_CLEANUP = 			0x9C40E004
-IOCTL_GET_EXCEPTION = 		0x9C40E008
+IOCTL_SETUP_STUFF =         0x9C40E000
+IOCTL_CLEANUP =             0x9C40E004
+IOCTL_GET_EXCEPTION =       0x9C40E008
 IOCTL_GET_EXCEPTION_COUNT = 0x9C40E00C
+IOCTL_SUSPEND_TRACKED =     0x9C40E010
+IOCTL_RETRIEVE_EXCEPTION =  0x9C40E014
+IOCTL_UNTRACK_AND_RESUME_PROCESSES = 0x9C40E018
+IOCTL_ADD_TRACKED = 0x9C40E01C
 
-class CatchedException(ctypes.Structure):
-    _fields_ = [("AccessedAddress", LPVOID),
-				("AccessedType",LONG),
-				("InDllLoad",LONG),
-				("LockCount",LONG),
-				("RecursionCount",LONG),
-				("OwningThread",HANDLE),
-				("CurrentThread",HANDLE),
-				("Physicallow",LONG),
-				("Physicalhigh",LONG),
-				("Esp",LONG),
-				("Esp_top",LONG),
-				("DllName",ctypes.c_wchar * MAX_PATH)]
+RWE_SINGLE_STEP = 0
+RWE_PAGE_RWX = 1
+
+INITIAL_EXECUTABLE = 0
+INITIAL_READ_ONLY = 1
 
 class PID_STRUCT(ctypes.Structure):
     _fields_ = [("do_log", DWORD),
-				("Pid", DWORD),
-				("UnpackEvent", HANDLE),
-				("PipeEvent", HANDLE),
-                ("TargetProcessHandle", HANDLE),
-				("ExpectedEip", LPVOID)]
+                ("RWEPolicy", DWORD),
+                ("InitiallyNonExecutable", DWORD),                
+                ("UserlandNotidyEvent", HANDLE), 
+                ("TargetProcessHandle", HANDLE)]
 
-
-
-#############################
-#### Scylla stuff
-#############################
-SCY_ERROR_SUCCESS = 0
-
-class Scylla:
-    def __init__(self, dll_path):
-        scylla_dll = ctypes.WinDLL(dll_path)
-
-        self.ScyllaDumpProcessA = scylla_dll.ScyllaDumpProcessA
-        self.ScyllaDumpProcessA.argtypes = [DWORD,LPVOID,LPVOID,LPVOID,LPTSTR]
-        self.ScyllaDumpProcessA.restype = DWORD
-
-        self.ScyllaIatSearch = scylla_dll.ScyllaIatSearch
-        self.ScyllaIatSearch.argtypes = [DWORD,LPVOID,LPDWORD,DWORD,BYTE]
-        self.ScyllaIatSearch.restype = DWORD
-
-        self.ScyllaIatFixAutoW = scylla_dll.ScyllaIatFixAutoW
-        self.ScyllaIatFixAutoW.argtypes = [LPVOID,DWORD,DWORD,LPTSTR,LPTSTR]
-        self.ScyllaIatFixAutoW.restype = DWORD
-
-        self.ScyllaRebuildFileA = scylla_dll.ScyllaRebuildFileA
-        self.ScyllaRebuildFileA.argtypes = [LPTSTR,DWORD,DWORD,DWORD]
-        self.ScyllaRebuildFileA.restype = DWORD
-
-
-class Process():
-	def __init__(self, path, log):
-		self.path = path
-		self.log = log
-		self.pid = 0
-		self.process_handle = 0
-		self.thread_handle = 0
-		self.main_module_name = self.path.split("\\")[-1]
-		self.modules = None
-		# Constants
-		self.SIZEOF_PE_BUFFER = 1024		
-		
-	def create_suspended(self):
-		pi = PROCESS_INFORMATION()
-		si = STARTUPINFO()
-		si.cb = ctypes.sizeof(si)
-		
-		success = KERNEL32.CreateProcessA(ctypes.c_char_p(0),
-                                                 ctypes.c_char_p(self.path),
-                                                 0,
-                                                 0,
-                                                 0,
-                                                 CREATE_SUSPENDED,
-                                                 0,
-                                                 0,
-                                                 ctypes.byref(si),
-                                                 ctypes.byref(pi))
-
-		if success:
-			self.pid = pi.dwProcessId
-			self.thread_handle = pi.hThread
-		else:
-                        raise UnpackerException("CreateProcessA failed !")
-			return 0
-			
-		#Re-open process with all access rights
-		self.process_handle = KERNEL32.OpenProcess(PROCESS_ALL_ACCESS,0,self.pid)
-		if self.process_handle == INVALID_HANDLE_VALUE:
-			raise UnpackerException("OpenProcess failed")
-			return 0			
-		
-		return 1
-
-	def resume(self):
-		return KERNEL32.ResumeThread(self.thread_handle)
-
-	def suspend(self):
-		return KERNEL32.SuspendThread(self.thread_handle)
-
-	def terminate(self):
-		KERNEL32.TerminateProcess(self.process_handle,0)
-		KERNEL32.CloseHandle(self.process_handle)
-		
-	def find_module_by_address(self, addr):
-		result = None
-		hModuleSnap = LPVOID(0)
-		me32 = MODULEENTRY32()
-		me32.dwSize = ctypes.sizeof(MODULEENTRY32)
-
-		hModuleSnap = KERNEL32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, self.pid)
-		if hModuleSnap == -1:
-			return result
-
-		module = KERNEL32.Module32First(hModuleSnap, ctypes.pointer(me32))
-		if module == 0 :
-			KERNEL32.CloseHandle(hModuleSnap)
-			return result
-
-		while module :
-			if me32.modBaseAddr < addr and addr < (me32.modBaseAddr + me32.modBaseSize):
-				result = me32
-				module = False
-				continue
-                
-			module = KERNEL32.Module32Next(hModuleSnap , ctypes.pointer(me32))
-
-		KERNEL32.CloseHandle(hModuleSnap)
-		return result
-		
-	def find_module_by_name(self,name):
-		if self.modules == None:
-			self.build_modules_dict()
-
-		return self.modules[name.lower()]
-				
-	def build_modules_dict(self):
-	
-		self.modules = {}
-		result = None
-		hModuleSnap = LPVOID(0)
-		me32 = MODULEENTRY32()
-		me32.dwSize = ctypes.sizeof(MODULEENTRY32)
-
-		hModuleSnap = KERNEL32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, self.pid)
-		if hModuleSnap == -1:
-			self.log.warn("CreateToolhelp32Snapshot failed")
-			return result
-
-		module = KERNEL32.Module32First(hModuleSnap, ctypes.pointer(me32))
-		if module == 0 :
-			self.log.warn("Module32First failed")
-			KERNEL32.CloseHandle(hModuleSnap)
-			return result
-
-		self.modules[me32.szModule.lower()] = me32			
-			
-		while module :
-			me32 = MODULEENTRY32()
-			me32.dwSize = ctypes.sizeof(MODULEENTRY32)			
-			module = KERNEL32.Module32Next(hModuleSnap , ctypes.pointer(me32))
-			self.modules[me32.szModule.lower()] = me32	
-			
-		KERNEL32.CloseHandle(hModuleSnap)
-		return result
-		
-	def is_address_in_other_module(self,addr,module_name):
-		
-		if self.modules == None:
-			self.build_modules_dict()
-			
-		mod_name_lower = module_name.lower()
-			
-		for name in self.modules.keys():
-			if name != mod_name_lower:
-				module = self.modules[name]
-				(addr_low, addr_high) = (module.modBaseAddr, module.modBaseAddr + module.modBaseSize)
-				if ( addr_low <= addr ) and ( addr < addr_high ):
-					return 1
-					
-		return 0
-					
-		
-	def is_address_in_dll(self,addr):
-	
-		return self.is_address_in_other_module(addr,self.main_module_name)
-		
-	def oep(self):
-		pe = pefile.PE(self.path)
-		
-		main_module = self.find_module_by_name(self.main_module_name)
-		if main_module == None:
-			return None
-		
-		oep = main_module.modBaseAddr + pe.OPTIONAL_HEADER.AddressOfEntryPoint
-		
-		return oep
-
-	def LocatePeBase(self, current_base):
-            MemInfo = MEMORY_BASIC_INFORMATION()
-            Pe_buffer = ctypes.create_string_buffer(self.SIZEOF_PE_BUFFER)
-            BytesToRead = LONG()
-
-            while True:
-               r = KERNEL32.VirtualQueryEx(self.process_handle, current_base, ctypes.byref(MemInfo), 
-                                                                 ctypes.sizeof(MemInfo))
-               if r == 0:
-                   self.log.warn("VirtualQuery failed on current_base !")
-                   return 0
-
-               if MemInfo.Type != MEM_PRIVATE or MemInfo.State != MEM_COMMIT:
-                   self.log.warn("Unexpected memory type encountered !")
-                   return 0
-
-               current_base = MemInfo.AllocationBase
-               r = KERNEL32.ReadProcessMemory(self.process_handle, current_base,
-                                                ctypes.byref(Pe_buffer),
-                                                self.SIZEOF_PE_BUFFER,
-                                                ctypes.byref(BytesToRead))
-               if r == 1 and Pe_buffer[0] == 'M' and Pe_buffer[1] == 'Z':
-                   return current_base
-               current_base = current_base - PAGE_SIZE
-
-            return 0
-
-        def FindModuleBase(self, Oep):
-            oep_in_private_memory = False
-            result = 0
-            MemInfo = MEMORY_BASIC_INFORMATION()
-
-            r = KERNEL32.VirtualQueryEx(self.process_handle, Oep, ctypes.byref(MemInfo), ctypes.sizeof(MemInfo))
-            if r == 0:
-                self.log.error("VirtualQuery failed on Oep !")
-                return (0, False)
-
-            if MemInfo.State == MEM_FREE:
-                self.log.error("Memory at Oep is free !")
-                return (0,False)
-
-            if MemInfo.Type == MEM_PRIVATE:
-                self.log.info("Oep is in private memory, scanning for valid PE")
-                result = self.process.LocatePeBase(MemInfo.AllocationBase)
-                oep_in_private_memory = True
-
-            elif MemInfo.Type == MEM_IMAGE:
-                self.log.info("Oep is in an image PE")
-                module = self.find_module_by_address(Oep)
-                if module != None:
-                    module_name = "%s" % module.szModule
-                    self.log.info("OEP is in module %s" % str(module_name))
-                    if os.path.basename(module_name.lower()) != os.path.basename(self.main_module_name.lower()):
-                        self.log.warn("Oep is not in main module")
-                        result = 0
-                    else:
-                        result = module.modBaseAddr
-                else:
-                        self.log.error("Unable to locate the image Oep is in")
-                        result = None
-            else:
-                result = 0
-
-            return (result, oep_in_private_memory)
-		
-		
 class UnpackerException(Exception):
    pass 
 
-
 class Gunpack():
 
-    def __init__(self, log, driver_name, filename, scylla_dll, unpacker, kernel_log):
+    def __init__(self, log, filename, scylla_dll, unpacker, kernel_log):
         self.filename = filename
         self.log = log
-        self.process = Process(unpacker.command_line, log)
-        self.unpacker = unpacker
+        
         self.kernel_log = kernel_log
+        self.process_running = False
+        self.hUnpackEvent = HANDLE(0)
+        
+        set.output_directory = "."
+        self.rwe_policy = RWE_SINGLE_STEP
+        self.initial_nx_state  = INITIAL_READ_ONLY
 
-        # Open driver device
-        self.hdevice = KERNEL32.CreateFileA(driver_name, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None)
-        if self.hdevice == INVALID_HANDLE_VALUE:
-            raise WinError()
+    def set_params(self, log, device_name, kernel_log, output_directory):
+    
+        self.device_name = device_name
+        self.log = log
+        self.kernel_log = kernel_log
+        self.output_directory = output_directory
+        
+    def set_max_unpack_time(self, max_unpack_time):
+        self.max_unpack_time = max_unpack_time * 1000
+        
+    def set_rwe_policy(self, rwe_policy):
+        self.rwe_policy = rwe_policy
+        
+    def set_initial_nx_state(self, initial_nx_state):
+        self.initial_nx_state = initial_nx_state        
 
-        self.log.info("Driver device file opened, handle = %d" % self.hdevice)
+    def pipe_reader_thread(self):
+        
+        evt_header = EVENT_HEADER()
+        nbRead = DWORD(0)
 
-        # Scylla
-        self.scylla = Scylla(scylla_dll)
-		
-        self.max_unpack_time = 30*ONE_SEC
+        while( self.thread_running ):
 
-    def set_unpack_time(self, utime):
-        self.max_unpack_time = utime*ONE_SEC
+            valid_object = True
+            
+            #Wait for the driver to signal an event is ready for retrieval
+            r = KERNEL32.WaitForSingleObject(self.UserlandNotidyEvent, INFINITE)
+            if (r == WAIT_OBJECT_0):
+                
+                #An event has arrived, request it to the driver
+                ReceiveBuffer = ctypes.create_string_buffer(1024)
+                BytesReturned = DWORD(0)
+                success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_RETRIEVE_EXCEPTION,NULL,0,ctypes.byref(ReceiveBuffer),ctypes.sizeof(ReceiveBuffer),ctypes.byref(BytesReturned),0)
+                if not(success):
+                    self.log.error("DeviceIoControl failed")
+                    raise UnpackerException("DeviceIoControl failed")
+                
+                header_size = ctypes.sizeof(EVENT_HEADER)
+                
+                #Ensure there is a header
+                if ( BytesReturned.value < header_size ):
+                    self.log.error( "Did not receive enough data from driver (%d bytes)" % BytesReturned.value )
+                    continue    
+                
+                #Copy the data in a EVENT_HEADER object
+                ctypes.memmove( ctypes.addressof(evt_header), ReceiveBuffer[0:header_size], header_size )
+                
+                #Ensure it is a known event
+                if not(Events.has_key( evt_header.event_type)):
+                    self.log.error("Received unknown event with type : %d" % evt_header.event_type)
+                    continue                
 
-    def Retrieve_Exceptions(self):
-        ExceptionsCount = LONG()
-        BytesReturned = DWORD()
+                #Ensure the object fits in the buffer
+                n_remaining_bytes = BytesReturned.value - header_size
+                
+                event_class = Events[evt_header.event_type]
+                
+                if ( n_remaining_bytes != ctypes.sizeof(event_class) ):
+                    self.log.error("Wrong event size. Received %d bytes, expected %d bytes" % (n_remaining_bytes, ctypes.sizeof(event_class)) )
+                    continue     
+                
+                event_obj = event_class()
+                
+                # "cast" the buffer in the appropriate event class
+                ctypes.memmove( ctypes.addressof(event_obj), ReceiveBuffer[header_size:], ctypes.sizeof(event_class) )
+                
+                #call the user defined event handler
+                result = self.event_handler(evt_header.event_type , event_obj)
+                if (result == 0):
+                    self.stop()
+                    return
 
-        #Retrieve exception count
-        success = KERNEL32.DeviceIoControl(self.hdevice, IOCTL_GET_EXCEPTION_COUNT,
-                                            NULL, 0,
-                                            ctypes.byref(ExceptionsCount),
-                                            ctypes.sizeof(ExceptionsCount),
-                                            ctypes.byref(BytesReturned), 0)
+
+    def stop(self):
+        KERNEL32.SetEvent(self.hUnpackEvent)
+
+    #Function called after each event
+    def event_handler(self, event_type, event_obj):        
+        pass
+        
+    #Function called once process is suspended
+    def post_treatment(self):
+        pass
+        
+    #Function called juste after target process creation but just before it is
+    #being started
+    def pre_run(self):
+        pass
+        
+    def add_tracked_pid(self, pid):
+        #Initiate driver's state and communication mecanisms
+        BytesReturned = DWORD(0)
+        pid = DWORD(pid)
+        success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_ADD_TRACKED,ctypes.byref(pid),ctypes.sizeof(pid),NULL,0,ctypes.byref(BytesReturned),0)
         if not(success):
-            self.log.error("DeviceIoControl failed : unable to retrieve exceptions count")
-            raise UnpackerException("DeviceIoControl failed : unable to retrieve exceptions count")
+            self.log.error("DeviceIoControl failed")
+            raise UnpackerException("DeviceIoControl failed")    
 
-        ExceptionsCount = ExceptionsCount.value
+    
+    def run(self, waiting_time):
+    
+        # Open driver device
+        self.hdevice = KERNEL32.CreateFileA(self.device_name, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None)
+        if self.hdevice == INVALID_HANDLE_VALUE:
+            self.log.error("CreateFileA failed with error : 0x%x" % KERNEL32.GetLastError())
+            quit()
 
-        MyCatchedException = CatchedException()
+        self.log.info("Driver device file opened, handle = %x" % self.hdevice)    
+    
+        #todo : build command line
+        self.process = Process(self.command_line, self.log)
 
-        ExceptionsList = []
+        self.process.create_suspended()
+        
+        self.pre_run()
+        
+        self.log.info("Target process handle value is 0x%x" % self.process.process_handle)
+        
+        self.thread_running = True
+        thread = Thread(target = self.pipe_reader_thread, args = ())
+        
+        #Create an unpack event which will be signaled when the
+        self.hUnpackEvent = KERNEL32.CreateEventA(NULL,0,0,"DaEvent")
+        self.UserlandNotidyEvent = KERNEL32.CreateEventA(NULL,0,0,"UserlandNotidyEvent")
+        
+        #Struct sent to the driver
+        MyPidStruct = PID_STRUCT()
+        MyPidStruct.do_log = self.kernel_log
+        MyPidStruct.RWEPolicy = self.rwe_policy;
+        MyPidStruct.InitialNXState = self.initial_nx_state;
+        MyPidStruct.UserlandNotidyEvent = self.UserlandNotidyEvent
+        MyPidStruct.TargetProcessHandle = self.process.process_handle
+        
+        #Initiate driver's state and communication mecanisms
+        BytesReturned = DWORD(0)
+        success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_SETUP_STUFF,ctypes.byref(MyPidStruct),ctypes.sizeof(MyPidStruct),NULL,0,ctypes.byref(BytesReturned),0)
+        if not(success):
+            self.log.error("DeviceIoControl failed")
+            raise UnpackerException("DeviceIoControl failed")
+            
+        thread.start()
 
-        for i in range(ExceptionsCount):
-            success = KERNEL32.DeviceIoControl(self.hdevice, IOCTL_GET_EXCEPTION,
-                                            NULL, 0,
-                                            ctypes.byref(MyCatchedException),
-                                            ctypes.sizeof(MyCatchedException),
-                                            ctypes.byref(BytesReturned), 0)
-            if not(success):
-                self.log.error("DeviceIoControl failed : unable to retrieve exception")
-                raise UnpackerException("DeviceIoControl failed : unable to retrieve exception")
+        #Resume main process thtread
+        self.process.resume()
+        self.log.info("Main thread resumed")
 
-            AccessedType = MyCatchedException.AccessedType
-            AccessedAddress = MyCatchedException.AccessedAddress
-            LockCount = MyCatchedException.LockCount
-            RecursionCount = MyCatchedException.RecursionCount
-            OwningThread = MyCatchedException.OwningThread
-            CurrentThread = MyCatchedException.CurrentThread
-            Physicallow = MyCatchedException.Physicallow
-            Physicalhigh = MyCatchedException.Physicalhigh
-            Esp = MyCatchedException.Esp
-            Esp_top = MyCatchedException.Esp_top
-            DllName = MyCatchedException.DllName
-			
-            if self.unpacker.filter_execption(self.process,MyCatchedException):
-			
-				NewException = CatchedException()
-				NewException.AccessedType = AccessedType
-				NewException.AccessedAddress = AccessedAddress
-				NewException.LockCount = LockCount
-				NewException.RecursionCount = RecursionCount
-				NewException.OwningThread = OwningThread
-				NewException.CurrentThread = CurrentThread
-				NewException.Physicallow = Physicallow
-				NewException.Physicalhigh = Physicalhigh
-				NewException.Esp = Esp
-				NewException.Esp_top = Esp_top	
-				NewException.PhysicalAccessedAddress = Physicalhigh * 0x100000000 + Physicallow
-				NewException.DllName = DllName
-				
-				ExceptionsList.append(NewException)
+        #Wait for unpacking to terminate
+        r = KERNEL32.WaitForSingleObject(self.hUnpackEvent,self.max_unpack_time)
+        if (r == WAIT_ABANDONED ):
+            self.log.error("Wait abandoned, something went wrong")
+            raise UnpackerException("Wait abandoned, something went wrong")
+            
+        if (r == WAIT_TIMEOUT):
+            self.log.info("Wait timed out")
+            self.log.info("Thread suspended")
 
-        self.unpacker.set_exeptions_list(ExceptionsList)
-
-    def Iat_Rebuild(self, dump_name, unpack_name, Oep):
-        result = False
-        iat_start = LPVOID(0)
-        iat_size = DWORD(0)
-
-        r = self.scylla.ScyllaIatSearch(self.process.pid, 
-                                        ctypes.byref(iat_start),
-                                        ctypes.byref(iat_size),
-                                        DWORD(Oep), 1)
-        if r == SCY_ERROR_SUCCESS:
-            self.log.info("iat found, address = 0x%x, size = 0x%x" % (iat_start.value,iat_size.value))
-
-            r = self.scylla.ScyllaIatFixAutoW(iat_start, iat_size, self.process.pid,
-                                                dump_name.encode("utf-16-le"),
-                                                unpack_name.encode("utf-16-le"))
-            if r == SCY_ERROR_SUCCESS:
-                r = self.scylla.ScyllaRebuildFileA(unpack_name, 0, 1, 1)
-                if r != SCY_ERROR_SUCCESS:
-                    result = True
-                else:
-                    self.log.error("ScyllaRebuildFileA failed !")
-            else:
-                self.log.error("ScyllaIatFixAutoW failed !")
-
-        return result
-
-    def UnpackOnce(self, PreviousOep):
-		oep_in_private_memory = False
-
-		#Start target process in suspended state
-		self.process.create_suspended()
-
-		self.log.info("Target process handle value is 0x%x" % self.process.process_handle)
-
-		#Create an unpack event which will be signaled when the
-		hUnpackEvent = KERNEL32.CreateEventA(NULL,0,0,"DaEvent")
-
-		#Struct sent to the driver, PreviousOep can be NULL
-		MyPidStruct = PID_STRUCT(self.kernel_log,self.process.pid,NULL,hUnpackEvent,self.process.process_handle,PreviousOep)
-
-		#Initiate driver's sta  te and communication mecanisms
-		BytesReturned = DWORD(0)
-		success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_SETUP_STUFF,ctypes.byref(MyPidStruct),ctypes.sizeof(MyPidStruct),NULL,0,ctypes.byref(BytesReturned),0)
-		if not(success):
-				self.log.error("DeviceIoControl failed")
-				raise UnpackerException("DeviceIoControl failed")
-
-		#Resume main process thtread
-		self.process.resume()
-		self.log.info("Main thread resumed")
-
-		#Wait for unpacking to terminate
-		r = KERNEL32.WaitForSingleObject(hUnpackEvent,self.max_unpack_time)
-		if (r == WAIT_ABANDONED ):
-				self.log.error("Wait abandoned, something went wrong")
-				raise UnpackerException("Wait abandoned, something went wrong")
-		if (r == WAIT_TIMEOUT):
-				self.log.info("Wait timed out")
-				self.process.suspend()
-				self.log.info("Thread suspended")
-
-		if (r == WAIT_OBJECT_0):
-				self.log.info("Event signaled")
-		
-		#Retrieve all exceptions logger by our driver
-		self.Retrieve_Exceptions()
-
-		success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_CLEANUP,NULL,0,NULL,0,ctypes.byref(BytesReturned),0)
-		if not(success):
-				self.log.error("DeviceIoControl failed : unable to process to cleanup")
-
-		if ( PreviousOep == NULL ):
-				#We are on the first run, we compute the Oep
-				#Apply algorithm to figure out Oep
-				Oep = self.unpacker.find_oep(self.process)
-				if( Oep == 0 ):
-					self.log.error("Oep not found !")
-					return (0,False)
-				else:
-					self.log.info("Found OEP at 0x%x" % Oep)
-		else:
-				#We are on the second run, we need to ensure that the last Exception is on the expected Oep
-				#If last exception is not our expected Oep this means that something went wrong
-				if ( self.unpacker.last_execption_address().AccessedAddress != PreviousOep ):
-					self.log.error("Unexpected Oep on second run")
-					return (0, False)
-				else:
-					Oep = PreviousOep
-
-		success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_CLEANUP,NULL,0,NULL,0,ctypes.byref(BytesReturned),0)
-		if not(success):
-				self.log.error("DeviceIoControl failed : unable to process tp cleanup")
-
-		if ( Oep == 0 ):
-				KERNEL32.TerminateProcess(self.hProcess,0)
-				self.log.error("Error OEP not found !")
-				raise UnpackerException("OEP Not found !")
-		else:
-				(module_base,oep_in_private_memory) = self.process.FindModuleBase(Oep)
-
-		if ( module_base == 0 ):
-				self.log.error("Unable to figure out module base !")
-				raise UnpackerException("Unable to figure out module base !")
-
-		self.log.info("Module base at : 0x%x" % module_base)
-
-		if ( ((PreviousOep == NULL) and (oep_in_private_memory)) or ( (PreviousOep != NULL) and not(oep_in_private_memory) ) ):
-				
-				r = self.scylla.ScyllaDumpProcessA(self.process.pid,NULL,module_base,Oep,self.unpacker.get_dump_name())
-				if (r == 0):
-					self.log.error("Error : unable to dump target process")
-					raise UnpackerException("Unable to dump target")
-				else:
-					self.log.info("Target process dumped with oep : 0x%x" % Oep)
-
-				if self.Iat_Rebuild(self.unpacker.get_dump_name()+"\x00",self.unpacker.get_unpack_name()+"\x00", Oep):
-					self.log.info("Iat rebuilt successfully")
-				else:
-					self.log.error("Unable to rebuild Iat")
-
-		self.process.terminate()
-		self.log.info("Process terminated")
-
-		KERNEL32.CloseHandle(hUnpackEvent)
-
-		return (Oep,oep_in_private_memory)
-
-    def clean(self):
+        if (r == WAIT_OBJECT_0):
+            self.log.info("Event signaled")
+        
+        BytesReturned = DWORD(0)
+        success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_SUSPEND_TRACKED,NULL,0,NULL,0,ctypes.byref(BytesReturned),0)
+        if not(success):
+            self.log.error("DeviceIoControl failed")
+            raise UnpackerException("DeviceIoControl failed")
+            
+        self.thread_running = False
+        
+        result = self.post_treatment()
+        
+        BytesReturned = DWORD(0)
+        success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_UNTRACK_AND_RESUME_PROCESSES,NULL,0,NULL,0,ctypes.byref(BytesReturned),0)
+        if not(success):
+            self.log.error("DeviceIoControl failed")
+            raise UnpackerException("DeviceIoControl failed")
+        
+        BytesReturned = DWORD(0)
+        success = KERNEL32.DeviceIoControl(self.hdevice,IOCTL_CLEANUP,NULL,0,NULL,0,ctypes.byref(BytesReturned),0)
+        if not(success):
+            self.log.error("DeviceIoControl failed")
+            raise UnpackerException("DeviceIoControl failed")
+        
         KERNEL32.CloseHandle(self.hdevice)
+        KERNEL32.CloseHandle(self.UserlandNotidyEvent)
+        
+        self.process.terminate()
+        
+        KERNEL32.ExitProcess(0)

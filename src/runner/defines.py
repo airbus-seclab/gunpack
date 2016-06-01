@@ -1,6 +1,23 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation.
-# This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
-# See the file 'docs/LICENSE' for copying permission.
+"""
+   Copyright 2016 Julien Lenoir / Airbus Group Innovations
+   contact: julien.lenoir@airbus.com
+"""
+"""
+	This file is part of Gunpack.
+
+	Gunpack is free software: you can redistribute it and/or modify
+	it under the terms of the GNU Affero General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	Gunpack is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with Gunpack.  If not, see <http://www.gnu.org/licenses/>.
+"""
 
 from ctypes import *
 
@@ -8,6 +25,7 @@ NTDLL    = windll.ntdll
 KERNEL32 = windll.kernel32
 ADVAPI32 = windll.advapi32
 USER32   = windll.user32
+PSAPI    = windll.psapi
 
 CHAR      = c_char
 BYTE      = c_ubyte
@@ -50,6 +68,7 @@ MEM_RESET                 = 0x00080000
 MEM_IMAGE                 = 0x01000000
 MEM_MAPPED                = 0x00040000
 MEM_PRIVATE               = 0x00020000
+MEM_FREE                  = 0x00010000
 
 PAGE_NOACCESS             = 0x00000001
 PAGE_READONLY             = 0x00000002
@@ -64,6 +83,7 @@ PAGE_NOCACHE              = 0x00000200
 PAGE_WRITECOMBINE         = 0x00000400
 
 PIPE_ACCESS_INBOUND       = 0x00000001
+PIPE_ACCESS_OUTBOUND      = 0x00000002
 PIPE_ACCESS_DUPLEX        = 0x00000003
 PIPE_TYPE_MESSAGE         = 0x00000004
 PIPE_READMODE_MESSAGE     = 0x00000002
@@ -77,6 +97,8 @@ ERROR_BROKEN_PIPE         = 0x0000006d
 ERROR_MORE_DATA           = 0x000000EA
 ERROR_PIPE_CONNECTED      = 0x00000217
 
+TH32CS_SNAPMODULE         = 0x00000008
+
 WAIT_TIMEOUT              = 0x00000102
 
 FILE_ATTRIBUTE_HIDDEN     = 0x00000002
@@ -85,8 +107,29 @@ WM_GETTEXT                = 0x0000000D
 WM_GETTEXTLENGTH          = 0x0000000E
 BM_CLICK                  = 0x000000F5
 
+
 WRITE_ACCESS				= 	1
 EXECUTE_ACCESS				= 	8
+
+
+class MODULEINFO(Structure):
+    _fields_ = [
+        ("lpBaseOfDll", PVOID),
+        ("SizeOfImage", DWORD),
+        ("EntryPoint", LPVOID),
+    ]
+
+class THE_CONTECXT(Structure):
+    _fields_ = [
+        ("Eax", LONG),
+        ("Ecx", LONG),
+        ("Edx", LONG),
+        ("Ebx", LONG),
+        ("Esp", LONG),
+        ("Esi", LONG),
+        ("Edi", LONG),
+        ("Eip", LONG),
+    ]
 
 class STARTUPINFO(Structure):
     _fields_ = [
